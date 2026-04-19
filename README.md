@@ -4,12 +4,6 @@ A TUI bookmark manager — save folders, files, and URLs, then find and open the
 
 **Requirements:** macOS, Python 3.11+
 
-## Install
-
-```zsh
-brew tap pavsefcik/tap && brew install lk
-```
-
 ## Usage
 
 ```
