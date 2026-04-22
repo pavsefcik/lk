@@ -221,17 +221,18 @@ class BookmarkItem(Static):
     BookmarkItem:hover {
         background: $surface-lighten-1;
     }
-    BookmarkItem.--selected {
-        background: $accent 30%;
+    BookmarkItem.selected {
+        background: $accent;
+        color: $text;
     }
     """
 
     def __init__(self, entry, index, mark=None, mode=None):
-        super().__init__()
         self.entry = entry
         self.index = index
         self.mark = mark
         self.mode = mode
+        super().__init__(self._render_text(), markup=True)
 
     def _render_text(self):
         title = self.entry["title"]
@@ -250,12 +251,9 @@ class BookmarkItem(Static):
         lines += f"\n    [dim italic]{path}[/dim italic]"
         return lines
 
-    def compose(self):
-        yield Static(self._render_text(), markup=True, id=f"bm-label-{self.index}")
-
     def set_mark(self, mark):
         self.mark = mark
-        self.query_one(f"#bm-label-{self.index}", Static).update(self._render_text())
+        self.update(self._render_text())
 
 
 class MenuItem(Static):
@@ -267,8 +265,9 @@ class MenuItem(Static):
     MenuItem:hover {
         background: $surface-lighten-1;
     }
-    MenuItem.--selected {
-        background: $accent 30%;
+    MenuItem.selected {
+        background: $accent;
+        color: $text;
     }
     """
 
@@ -563,7 +562,10 @@ class SearchScreen(Screen):
         visible = self.matches[:self.MAX_VISIBLE]
         for i, entry in enumerate(visible):
             mark = (i in self._marked) if self._mode else None
-            container.mount(BookmarkItem(entry, i, mark=mark, mode=self._mode))
+            item = BookmarkItem(entry, i, mark=mark, mode=self._mode)
+            if i == self.selected_index:
+                item.add_class("selected")
+            container.mount(item)
         self.call_after_refresh(self._highlight)
         self._update_status()
 
@@ -592,10 +594,10 @@ class SearchScreen(Screen):
         items = self.query("BookmarkItem")
         for i, item in enumerate(items):
             if i == self.selected_index:
-                item.add_class("--selected")
+                item.add_class("selected")
                 item.scroll_visible()
             else:
-                item.remove_class("--selected")
+                item.remove_class("selected")
 
     def action_escape(self):
         if self._mode:
@@ -671,9 +673,9 @@ class ChooserScreen(Screen):
         items = self.query("MenuItem")
         for i, item in enumerate(items):
             if i == self.selected_index:
-                item.add_class("--selected")
+                item.add_class("selected")
             else:
-                item.remove_class("--selected")
+                item.remove_class("selected")
 
     def action_move_down(self):
         self.selected_index = (self.selected_index + 1) % len(self.options)
