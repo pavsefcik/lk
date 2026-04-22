@@ -2,7 +2,7 @@
 
 A TUI bookmark manager — save folders, files, and URLs, then find and open them instantly with fuzzy search.
 
-**Requirements:** macOS, Python 3.11+, [uv](https://github.com/astral-sh/uv)
+**Requirements:** macOS, [Go](https://go.dev) 1.24+
 
 ## Install
 
@@ -10,14 +10,16 @@ A TUI bookmark manager — save folders, files, and URLs, then find and open the
    ```zsh
    git clone https://github.com/pavsefcik/lk
    ```
-2. Double-click `install.command` inside the cloned folder (or run `./install.command` from it).
-
-The installer adds an `lk` alias to your `~/.zshrc` pointing at wherever you cloned it, and primes the virtualenv.
+2. Build the binary:
+   ```zsh
+   cd lk && go build -o lk .
+   ```
+3. Put the binary on your `$PATH`, or just call it by its full path.
 
 ## Usage
 
 ```
-lk                     Save current Finder path, or open the chooser
+lk                     Open the main menu (grabs current Finder path)
 lk /some/path          Save a folder or file
 lk https://example.com Save a URL
 lk something           Search bookmarks and open the result
@@ -34,7 +36,7 @@ lk something           Search bookmarks and open the result
 | `^o`      | Enter multi-open mode                   |
 | `space`   | Toggle mark (in delete / multi modes)   |
 | `enter`   | Confirm delete / open all marked        |
-| `esc`     | Back out of modal, or back to main menu |
+| `esc`     | Back out of mode, or back to main menu  |
 
 - Files are revealed in Finder.
 - Folders open in Finder.
