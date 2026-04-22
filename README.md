@@ -18,15 +18,6 @@ A TUI bookmark manager — save folders, files, and URLs, then find and open the
 
 ## Usage
 
-```
-lk                     Open the main menu (grabs current Finder path)
-lk /some/path          Save a folder or file
-lk https://example.com Save a URL
-lk something           Search bookmarks and open the result
-```
-
-### Inside the search TUI
-
 | Key       | Action                                  |
 | --------- | --------------------------------------- |
 | `↑ / ↓`   | Move selection                          |
