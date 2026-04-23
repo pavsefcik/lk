@@ -221,18 +221,17 @@ class BookmarkItem(Static):
     BookmarkItem:hover {
         background: $surface-lighten-1;
     }
-    BookmarkItem.selected {
-        background: $accent;
-        color: $text;
+    BookmarkItem.--selected {
+        background: $accent 30%;
     }
     """
 
     def __init__(self, entry, index, mark=None, mode=None):
+        super().__init__()
         self.entry = entry
         self.index = index
         self.mark = mark
         self.mode = mode
-        super().__init__(self._render_text(), markup=True)
 
     def _render_text(self):
         title = self.entry["title"]
@@ -251,9 +250,12 @@ class BookmarkItem(Static):
         lines += f"\n    [dim italic]{path}[/dim italic]"
         return lines
 
+    def compose(self):
+        yield Static(self._render_text(), markup=True, id=f"bm-label-{self.index}")
+
     def set_mark(self, mark):
         self.mark = mark
-        self.update(self._render_text())
+        self.query_one(f"#bm-label-{self.index}", Static).update(self._render_text())
 
 
 class MenuItem(Static):
@@ -265,9 +267,8 @@ class MenuItem(Static):
     MenuItem:hover {
         background: $surface-lighten-1;
     }
-    MenuItem.selected {
-        background: $accent;
-        color: $text;
+    MenuItem.--selected {
+        background: $accent 30%;
     }
     """
 
@@ -427,15 +428,15 @@ class SearchScreen(Screen):
         yield VerticalScroll(id="results")
         yield Static("", id="status")
 
-    def on_mount(self):
+    async def on_mount(self):
         if not self.all_entries:
             self.app.notify("No bookmarks yet. Add one from the main menu.", severity="warning")
             self.call_after_refresh(self.dismiss)
             return
         self.query_one("#search", SearchInput).focus()
-        self._refresh_results()
+        await self._refresh_results()
 
-    def on_key(self, event):
+    async def on_key(self, event):
         if not self._mode:
             return
         key = event.key
@@ -462,15 +463,15 @@ class SearchScreen(Screen):
                     self._confirming = True
                     self._update_status()
                 else:
-                    self._do_delete()
+                    await self._do_delete()
             elif self._mode == "multi":
-                self._do_multi_open()
+                await self._do_multi_open()
         elif key == "escape":
             if self._confirming:
                 self._confirming = False
                 self._update_status()
             else:
-                self._exit_mode()
+                await self._exit_mode()
 
     def on_search_input_navigate(self, event: SearchInput.Navigate):
         if self.matches:
@@ -485,22 +486,22 @@ class SearchScreen(Screen):
             entry = self.matches[self.selected_index]
             self.app.push_screen(SaveScreen(entry["path"], existing=entry), self._after_edit)
 
-    def on_search_input_delete_bookmark(self, event: SearchInput.DeleteBookmark):
+    async def on_search_input_delete_bookmark(self, event: SearchInput.DeleteBookmark):
         if self.matches:
-            self._enter_mode("delete")
+            await self._enter_mode("delete")
 
-    def on_search_input_multi_pick(self, event: SearchInput.MultiPick):
+    async def on_search_input_multi_pick(self, event: SearchInput.MultiPick):
         if self.matches:
-            self._enter_mode("multi")
+            await self._enter_mode("multi")
 
-    def _after_edit(self, result):
+    async def _after_edit(self, result):
         self.all_entries = load()
         self._search_texts = build_search_texts(self.all_entries)
         q = self.query_one("#search", SearchInput).value.strip()
         self.matches = filter_entries(q, self.all_entries, self._search_texts)
         self._last_query = q
         self.selected_index = 0
-        self._refresh_results()
+        await self._refresh_results()
 
     def on_input_changed(self, event: Input.Changed):
         if self._filter_timer is not None:
@@ -508,7 +509,7 @@ class SearchScreen(Screen):
         self._pending_query = event.value.strip()
         self._filter_timer = self.set_timer(0.15, self._do_filter)
 
-    def _do_filter(self):
+    async def _do_filter(self):
         q = self._pending_query
         if q and self._last_query and q.startswith(self._last_query):
             source = self.matches
@@ -519,25 +520,25 @@ class SearchScreen(Screen):
         self.matches = filter_entries(q, source, texts)
         self._last_query = q
         self.selected_index = 0
-        self._refresh_results()
+        await self._refresh_results()
 
-    def _enter_mode(self, mode):
+    async def _enter_mode(self, mode):
         self._mode = mode
         self._marked = set()
         self._confirming = False
         self.query_one("#search", SearchInput).disabled = True
-        self._refresh_results()
+        await self._refresh_results()
 
-    def _exit_mode(self):
+    async def _exit_mode(self):
         self._mode = None
         self._marked = set()
         self._confirming = False
         search = self.query_one("#search", SearchInput)
         search.disabled = False
         search.focus()
-        self._refresh_results()
+        await self._refresh_results()
 
-    def _do_delete(self):
+    async def _do_delete(self):
         paths_to_delete = {self.matches[i]["path"] for i in self._marked}
         self.all_entries = [e for e in self.all_entries if e["path"] not in paths_to_delete]
         persist(self.all_entries)
@@ -546,27 +547,24 @@ class SearchScreen(Screen):
         self.matches = filter_entries(q, self.all_entries, self._search_texts)
         self._last_query = q
         self.selected_index = 0
-        self._exit_mode()
+        await self._exit_mode()
 
-    def _do_multi_open(self):
+    async def _do_multi_open(self):
         for i in sorted(self._marked):
             open_path(self.matches[i]["path"])
-        self._exit_mode()
+        await self._exit_mode()
 
     def watch_selected_index(self, value):
         self._highlight()
 
-    def _refresh_results(self):
+    async def _refresh_results(self):
         container = self.query_one("#results", VerticalScroll)
-        container.remove_children()
+        await container.remove_children()
         visible = self.matches[:self.MAX_VISIBLE]
         for i, entry in enumerate(visible):
             mark = (i in self._marked) if self._mode else None
-            item = BookmarkItem(entry, i, mark=mark, mode=self._mode)
-            if i == self.selected_index:
-                item.add_class("selected")
-            container.mount(item)
-        self.call_after_refresh(self._highlight)
+            await container.mount(BookmarkItem(entry, i, mark=mark, mode=self._mode))
+        self._highlight()
         self._update_status()
 
     def _update_status(self):
@@ -594,14 +592,14 @@ class SearchScreen(Screen):
         items = self.query("BookmarkItem")
         for i, item in enumerate(items):
             if i == self.selected_index:
-                item.add_class("selected")
+                item.add_class("--selected")
                 item.scroll_visible()
             else:
-                item.remove_class("selected")
+                item.remove_class("--selected")
 
-    def action_escape(self):
+    async def action_escape(self):
         if self._mode:
-            self._exit_mode()
+            await self._exit_mode()
         else:
             self.dismiss()
 
@@ -673,9 +671,9 @@ class ChooserScreen(Screen):
         items = self.query("MenuItem")
         for i, item in enumerate(items):
             if i == self.selected_index:
-                item.add_class("selected")
+                item.add_class("--selected")
             else:
-                item.remove_class("selected")
+                item.remove_class("--selected")
 
     def action_move_down(self):
         self.selected_index = (self.selected_index + 1) % len(self.options)
