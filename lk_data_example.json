@@ -1,0 +1,12 @@
+[
+  {
+    "path": "/Users/you/Documents",
+    "title": "Documents",
+    "description": "example folder bookmark"
+  },
+  {
+    "path": "https://example.com",
+    "title": "Example",
+    "description": "example URL bookmark"
+  }
+]
