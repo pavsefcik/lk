@@ -28,6 +28,7 @@ A TUI bookmark manager — save folders, files, and URLs, then find and open the
 | `space`   | Toggle mark (in delete / multi modes)   |
 | `enter`   | Confirm delete / open all marked        |
 | `esc`     | Back out of mode, or back to main menu  |
+| `^b`      | Toggle solid black background           |
 
 - Files are revealed in Finder.
 - Folders open in Finder.

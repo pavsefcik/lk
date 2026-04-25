@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -42,6 +43,7 @@ type model struct {
 	save          saveModel
 	// save needs to know where to return after editing
 	saveReturnTo screenID
+	blackBg      bool
 }
 
 func newModel(initial screenID, arg string) model {
@@ -83,6 +85,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
+		if msg.String() == "ctrl+b" {
+			m.blackBg = !m.blackBg
+			blackBgOn = m.blackBg
+			rebuildTheme()
+			styleInput(&m.search.input)
+			for i := range m.save.inputs {
+				styleInput(&m.save.inputs[i])
+			}
+			if m.screen == screenSearch {
+				m.search.viewport.SetContent(renderSearchResults(m.search, m.width))
+			}
+			return m, tea.Sequence(tea.ExitAltScreen, tea.EnterAltScreen)
+		}
 	case finderPathMsg:
 		m.chooser.finderPath = msg.path
 		return m, nil
@@ -107,17 +122,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	var out string
 	switch m.screen {
 	case screenChooser:
-		return m.viewChooser()
+		out = m.viewChooser()
 	case screenSearch:
-		return m.viewSearch()
+		out = m.viewSearch()
 	case screenSave:
-		return m.viewSave()
+		out = m.viewSave()
 	case screenHelp:
-		return m.viewHelp()
+		out = m.viewHelp()
 	}
-	return ""
+	if m.width > 0 && m.height > 0 {
+		out = padToScreen(out, m.width, m.height)
+		if m.blackBg {
+			out = forceBlackBg(out)
+		} else {
+			out = "\x1b[0m" + out
+		}
+	}
+	return out
+}
+
+
+// padToScreen pads output to exactly w × h cells using literal spaces and
+// newlines. lipgloss's Height() pads with bare `\n`, which only moves the
+// cursor and leaves prior-frame cells untouched — that's why toggling off
+// black bg left ghost rows. Writing real spaces forces a repaint.
+func padToScreen(s string, w, h int) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if vw := lipgloss.Width(l); vw < w {
+			lines[i] = l + strings.Repeat(" ", w-vw)
+		}
+	}
+	for len(lines) < h {
+		lines = append(lines, strings.Repeat(" ", w))
+	}
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// forceBlackBg re-asserts truecolor #000000 background after every SGR
+// escape lipgloss emits (matching what the styles themselves use), so any
+// reset to terminal-default that would expose unstyled cells gets paved
+// over with the same exact black as the styled spans.
+var sgrRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+const blackBgEsc = "\x1b[48;2;0;0;0m"
+
+func forceBlackBg(s string) string {
+	s = sgrRe.ReplaceAllStringFunc(s, func(m string) string { return m + blackBgEsc })
+	return blackBgEsc + s
 }
 
 // ---------- chooser ----------
@@ -138,17 +196,17 @@ func newChooserModel() chooserModel {
 }
 
 func (c chooserModel) options() []menuOption {
-	saveLabel := "  " + styleBold.Render("Save this path")
+	saveLabel := styleBold.Render("Save this path")
 	if c.finderPath == "" {
-		saveLabel = "  " + styleBold.Render("Add bookmark")
+		saveLabel = styleBold.Render("Add bookmark")
 	}
 	return []menuOption{
 		{saveLabel, "save"},
-		{"  " + styleBold.Render("Search bookmarks"), "search"},
-		{"  " + styleDim.Render("Reload Finder path"), "reload"},
-		{"  " + styleDim.Render("Open data folder"), "data_folder"},
-		{"  " + styleDim.Render("Help"), "help"},
-		{"  " + styleDim.Render("Exit"), "exit"},
+		{styleBold.Render("Search bookmarks"), "search"},
+		{styleDim.Render("Reload Finder path"), "reload"},
+		{styleDim.Render("Open data folder"), "data_folder"},
+		{styleDim.Render("Help"), "help"},
+		{styleDim.Render("Exit"), "exit"},
 	}
 }
 
@@ -193,6 +251,9 @@ func (m model) chooserSelect() (model, tea.Cmd) {
 		m.screen = screenSave
 	case "search":
 		m.search = newSearchModel("")
+		m.search.viewport.Width = m.width
+		m.search.viewport.Height = m.height - 4
+		m.search.viewport.SetContent(renderSearchResults(m.search, m.width))
 		m.screen = screenSearch
 	case "reload":
 		return m, tea.Batch(fetchFinderPathCmd, m.chooserFlash("Reloading…", 1800))
@@ -232,21 +293,24 @@ func (m model) viewChooser() string {
 
 	// header
 	sb.WriteString("\n")
+	sb.WriteString(renderBrand("bookmark anything") + "\n\n")
 	if m.chooser.finderPath != "" {
-		sb.WriteString("  " + styleBold.Render("Finder path:") + " " + styleDim.Render(m.chooser.finderPath) + "\n")
+		sb.WriteString("  " + styleAccent2.Render("◆") + "  " + styleDim.Render(m.chooser.finderPath) + "\n")
 	} else {
-		sb.WriteString("  " + styleDim.Render("No Finder path selected") + "\n")
+		sb.WriteString("  " + styleBarDim.Render("◇") + "  " + styleDim.Render("no Finder path") + "\n")
 	}
 	sb.WriteString("\n")
 
 	// menu
 	opts := m.chooser.options()
 	for i, opt := range opts {
-		line := opt.label
+		var prefix string
 		if i == m.chooser.selected {
-			line = styleSelected.Render(line)
+			prefix = " " + styleBar.Render(barChar) + " "
+		} else {
+			prefix = "   "
 		}
-		sb.WriteString(line + "\n")
+		sb.WriteString(prefix + opt.label + "\n")
 	}
 
 	// fill + status
@@ -297,6 +361,7 @@ func newSearchModel(initial string) searchModel {
 	ti.Focus()
 	ti.KeyMap.DeleteCharacterForward.Unbind()
 	ti.KeyMap.LineEnd.Unbind()
+	styleInput(&ti)
 
 	entries := load()
 	texts := buildSearchTexts(entries)
@@ -546,31 +611,33 @@ func renderBookmarkItem(e bookmark, index int, selected bool, mode searchMode, m
 	if mode != modeNormal {
 		if marked[index] {
 			if mode == modeDelete {
-				indicator = styleBoldRed.Render("✕") + "  "
+				indicator = styleBoldRed.Render("✕")
 			} else {
-				indicator = styleBoldGreen.Render("✓") + "  "
+				indicator = styleBoldGreen.Render("✓")
 			}
 		} else {
-			indicator = styleDim.Render("·") + "  "
+			indicator = styleDim.Render("·")
 		}
 	} else {
-		indicator = styleBold.Render(fmt.Sprintf("%d", index+1)) + "  "
+		indicator = styleAccent2.Render(fmt.Sprintf("%d", index+1))
 	}
 
 	title := styleBold.Render(e.Title)
-	var lines []string
-	lines = append(lines, "  "+indicator+title)
+	var content []string
+	content = append(content, indicator+"  "+title)
 	if e.Description != "" {
-		lines = append(lines, "    "+styleDim.Render(e.Description))
+		content = append(content, "   "+styleDim.Render(e.Description))
 	}
-	lines = append(lines, "    "+styleDimItalic.Render(e.Path))
-	lines = append(lines, "")
+	content = append(content, "   "+styleDimItalic.Render(e.Path))
 
-	row := strings.Join(lines, "\n")
+	bar := styleBarDim.Render(barChar)
 	if selected && mode == modeNormal {
-		row = styleSelected.Width(width).Render(row)
+		bar = styleBar.Render(barChar)
 	}
-	return row
+	for i, l := range content {
+		content[i] = " " + bar + "  " + l
+	}
+	return strings.Join(content, "\n") + "\n\n"
 }
 
 func renderSearchResults(sm searchModel, width int) string {
@@ -615,26 +682,18 @@ func renderSearchStatus(sm searchModel, total int) string {
 }
 
 func (m model) viewSearch() string {
-	vpHeight := m.height - 4
-	if vpHeight < 1 {
-		vpHeight = 1
-	}
-	m.search.viewport.Height = vpHeight
-	m.search.viewport.Width = m.width
-
-	header := "\n  " + m.search.input.View() + "\n"
-	body := m.search.viewport.View()
+	header := "\n" + renderBrand("search") + "\n\n  " +
+		styleAccent.Render("›") + " " + m.search.input.View() + "\n"
 	status := renderSearchStatus(m.search, len(m.search.allEntries))
 
-	// pad body to fill terminal
 	bodyHeight := m.height - lipgloss.Height(header) - 1
-	if bodyHeight < 0 {
-		bodyHeight = 0
+	if bodyHeight < 1 {
+		bodyHeight = 1
 	}
-	if m.search.viewport.Height != bodyHeight {
-		m.search.viewport.Height = bodyHeight
-	}
+	m.search.viewport.Height = bodyHeight
+	m.search.viewport.Width = m.width
 
+	body := m.search.viewport.View()
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, status)
 }
 
@@ -660,6 +719,7 @@ func newSaveModel(path string, existing *bookmark) saveModel {
 		ti := textinput.New()
 		ti.Placeholder = placeholder
 		ti.SetValue(value)
+		styleInput(&ti)
 		return ti
 	}
 
@@ -842,7 +902,8 @@ func commitSave(path, title, desc string, existing *bookmark) (action, savedTitl
 func (m model) viewSave() string {
 	sm := m.save
 	var sb strings.Builder
-	sb.WriteString("\n  " + sm.headerText + "\n\n")
+	sb.WriteString("\n" + renderBrand("save") + "\n\n")
+	sb.WriteString("  " + sm.headerText + "\n\n")
 
 	if sm.showPath {
 		sb.WriteString("  " + sm.inputs[inputPath].View() + "\n\n")
@@ -863,9 +924,7 @@ func (m model) viewSave() string {
 
 // ---------- help ----------
 
-const helpText = `lk // bookmark folders, files, and URLs
-
-Usage:
+const helpText = `Usage:
   lk                     Open main menu (grab Finder path or search)
   lk /some/path          Save a folder or file
   lk https://example.com Save a URL
@@ -881,7 +940,11 @@ Search screen:
 
 Save screen:
   enter     advance / confirm
-  esc       cancel`
+  esc       cancel
+
+Global:
+  ^b        toggle black background
+  ^c        quit`
 
 func (m model) updateHelp(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg, ok := msg.(tea.KeyMsg); ok {
@@ -894,7 +957,8 @@ func (m model) updateHelp(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) viewHelp() string {
-	body := "\n" + lipgloss.NewStyle().PaddingLeft(2).Render(helpText) + "\n"
+	body := "\n" + renderBrand("help") + "\n\n" +
+		lipgloss.NewStyle().PaddingLeft(2).Render(helpText) + "\n"
 	status := styleMuted.Render("  enter/esc close")
 	if m.height > 0 {
 		used := lipgloss.Height(body) + 1
