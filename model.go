@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,8 +31,21 @@ const (
 
 // ---------- messages ----------
 
-type finderPathMsg struct{ path string }
+type finderPathMsg struct {
+	path    string
+	manual  bool
+}
 type clearFlashMsg struct{ id int }
+type clearReloadedMsg struct{ id int }
+type reloadedFadeMsg struct {
+	id      int
+	visible int
+}
+type startSelectHintFadeMsg struct{ id int }
+type selectHintFadeMsg struct {
+	id      int
+	visible int
+}
 type openDoneMsg struct{}
 
 // ---------- root model ----------
@@ -74,6 +89,44 @@ func fetchFinderPathCmd() tea.Msg {
 	return finderPathMsg{path: getFinderPath()}
 }
 
+// scheduleFade schedules n ticks across `total` time using an ease-in-quad
+// curve over the cumulative count — gentle initial pause, accelerating through
+// to the last letter (no end hesitation). `makeMsg` is called with the visible
+// count after each step (n-1, n-2, … 0).
+func scheduleFade(n int, total time.Duration, makeMsg func(visible int) tea.Msg) tea.Cmd {
+	cmds := make([]tea.Cmd, 0, n)
+	for i := 1; i <= n; i++ {
+		y := float64(i) / float64(n)
+		t := math.Sqrt(y) // inverse of easeInQuad
+		delay := time.Duration(t * float64(total))
+		visible := n - i
+		cmds = append(cmds, tea.Tick(delay, func(time.Time) tea.Msg {
+			return makeMsg(visible)
+		}))
+	}
+	return tea.Batch(cmds...)
+}
+
+func fadeReloadedCmd(id, n int, total time.Duration) tea.Cmd {
+	return scheduleFade(n, total, func(v int) tea.Msg {
+		return reloadedFadeMsg{id: id, visible: v}
+	})
+}
+
+func fadeSelectHintCmd(id, n int, total time.Duration) tea.Cmd {
+	return scheduleFade(n, total, func(v int) tea.Msg {
+		return selectHintFadeMsg{id: id, visible: v}
+	})
+}
+
+// reloadFinderPathCmd adds a small artificial delay so the spinner is visible
+// — pure UX, since getFinderPath() is fast.
+func reloadFinderPathCmd() tea.Msg {
+	path := getFinderPath()
+	time.Sleep(700 * time.Millisecond)
+	return finderPathMsg{path: path, manual: true}
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -100,6 +153,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case finderPathMsg:
 		m.chooser.finderPath = msg.path
+		m.chooser.reloading = false
+		if msg.manual {
+			m.chooser.reloaded = true
+			m.chooser.reloadedVisible = len("Reloaded")
+			m.chooser.reloadedID++
+			id := m.chooser.reloadedID
+			return m, tea.Tick(1*time.Second, func(time.Time) tea.Msg {
+				return clearReloadedMsg{id}
+			})
+		}
+		return m, nil
+	case clearReloadedMsg:
+		if msg.id == m.chooser.reloadedID {
+			return m, fadeReloadedCmd(msg.id, len("Reloaded"), 700*time.Millisecond)
+		}
+		return m, nil
+	case reloadedFadeMsg:
+		if msg.id == m.chooser.reloadedID {
+			m.chooser.reloadedVisible = msg.visible
+			if msg.visible <= 0 {
+				m.chooser.reloaded = false
+			}
+		}
+		return m, nil
+	case startSelectHintFadeMsg:
+		if msg.id == m.chooser.selectHintID {
+			return m, fadeSelectHintCmd(msg.id, len(selectHintWord), 700*time.Millisecond)
+		}
+		return m, nil
+	case selectHintFadeMsg:
+		if msg.id == m.chooser.selectHintID {
+			m.chooser.selectHintVisible = msg.visible
+			if msg.visible <= 0 {
+				m.chooser.selectHint = false
+			}
+		}
+		return m, nil
+	case spinner.TickMsg:
+		if m.chooser.reloading {
+			var cmd tea.Cmd
+			m.chooser.spinner, cmd = m.chooser.spinner.Update(msg)
+			return m, cmd
+		}
 		return m, nil
 	case clearFlashMsg:
 		if msg.id == m.chooser.flashID {
@@ -185,33 +281,125 @@ type menuOption struct {
 }
 
 type chooserModel struct {
-	finderPath string
-	selected   int
-	flashMsg   string
-	flashID    int
+	finderPath     string
+	selected       int
+	flashMsg       string
+	flashID        int
+	reloading       bool
+	reloaded        bool
+	reloadedID      int
+	reloadedVisible int
+	spinner         spinner.Model
+	confirmingExit  bool
+	exitChoice      int // 0 = Yes, 1 = No
+	// "No path selected" → click → "Select a path in Finder" → fade back.
+	selectHint        bool
+	selectHintID      int
+	selectHintVisible int
+}
+
+const selectHintWord = "Select a path in Finder"
+const noPathWord = "No path selected"
+
+// renderNoPathLabel returns the label for the "no path" menu slot. By default
+// it shows "No path selected" in muted grey. When the user has clicked it, it
+// switches to "Select a path in Finder" and fades letter-by-letter (left→right)
+// back to "No path selected" — same animation as Reloaded.
+func renderNoPathLabel(c chooserModel) string {
+	if !c.selectHint {
+		return styleMuted.Render(noPathWord)
+	}
+	v := c.selectHintVisible
+	if v > len(selectHintWord) {
+		v = len(selectHintWord)
+	}
+	if v < 0 {
+		v = 0
+	}
+	// Left-to-right fade: replace the first (len-v) chars with spaces.
+	shown := strings.Repeat(" ", len(selectHintWord)-v) + selectHintWord[len(selectHintWord)-v:]
+	return styleDim.Render(shown)
 }
 
 func newChooserModel() chooserModel {
-	return chooserModel{}
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = styleAccent
+	return chooserModel{spinner: sp}
 }
 
 func (c chooserModel) options() []menuOption {
-	saveLabel := styleBold.Render("Save this path")
-	if c.finderPath == "" {
-		saveLabel = styleBold.Render("Add bookmark")
+	var opts []menuOption
+	if c.finderPath != "" {
+		opts = append(opts, menuOption{styleBold.Render("Bookmark selected path"), "save"})
+	} else {
+		opts = append(opts, menuOption{renderNoPathLabel(c), "nopath"})
 	}
-	return []menuOption{
-		{saveLabel, "save"},
-		{styleBold.Render("Search bookmarks"), "search"},
-		{styleDim.Render("Reload Finder path"), "reload"},
-		{styleDim.Render("Open data folder"), "data_folder"},
-		{styleDim.Render("Help"), "help"},
-		{styleDim.Render("Exit"), "exit"},
+	opts = append(opts,
+		menuOption{styleBold.Render("Add bookmark"), "add"},
+		menuOption{styleBold.Render("Search bookmarks"), "search"},
+	)
+	reloadLabel := styleDim.Render("Reload Finder path")
+	if c.reloading {
+		reloadLabel = styleDim.Render("Reload Finder path  ") + c.spinner.View()
+	} else if c.reloaded {
+		word := "Reloaded"
+		v := c.reloadedVisible
+		if v > len(word) {
+			v = len(word)
+		}
+		if v < 0 {
+			v = 0
+		}
+		// Remove from the left: replace the first (len-v) letters with spaces,
+		// keep the remaining suffix so position is preserved.
+		shown := strings.Repeat(" ", len(word)-v) + word[len(word)-v:]
+		reloadLabel = styleDim.Render("Reload Finder path  ") + styleBoldGreen.Render(shown)
 	}
+	opts = append(opts,
+		menuOption{reloadLabel, "reload"},
+		menuOption{styleDim.Render("Open data folder"), "data_folder"},
+		menuOption{styleDim.Render("Help"), "help"},
+		menuOption{styleDim.Render("Exit"), "exit"},
+	)
+	return opts
 }
 
 func (m model) updateChooser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	opts := m.chooser.options()
+	if m.chooser.confirmingExit {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "left", "h", "right", "l", "tab", "shift+tab":
+				m.chooser.exitChoice = 1 - m.chooser.exitChoice
+			case "enter":
+				if m.chooser.exitChoice == 0 {
+					return m, tea.Quit
+				}
+				m.chooser.confirmingExit = false
+			case "y", "Y":
+				return m, tea.Quit
+			case "n", "N", "esc":
+				m.chooser.confirmingExit = false
+			}
+		case tea.MouseMsg:
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+				if c := m.exitChoiceAt(msg.X, msg.Y); c >= 0 {
+					m.chooser.exitChoice = c
+					if c == 0 {
+						return m, tea.Quit
+					}
+					m.chooser.confirmingExit = false
+				}
+			} else if msg.Action == tea.MouseActionMotion {
+				if c := m.exitChoiceAt(msg.X, msg.Y); c >= 0 {
+					m.chooser.exitChoice = c
+				}
+			}
+		}
+		return m, nil
+	}
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -221,11 +409,60 @@ func (m model) updateChooser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chooser.selected = (m.chooser.selected + 1) % len(opts)
 		case "enter":
 			return m.chooserSelect()
-		case "esc", "q":
-			return m, tea.Quit
+		}
+	case tea.MouseMsg:
+		idx := m.chooserItemAt(msg.Y)
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.chooser.selected = (m.chooser.selected - 1 + len(opts)) % len(opts)
+		case tea.MouseButtonWheelDown:
+			m.chooser.selected = (m.chooser.selected + 1) % len(opts)
+		case tea.MouseButtonLeft:
+			if idx >= 0 && msg.Action == tea.MouseActionPress {
+				m.chooser.selected = idx
+				return m.chooserSelect()
+			}
+		default:
+			if msg.Action == tea.MouseActionMotion && idx >= 0 {
+				m.chooser.selected = idx
+			}
 		}
 	}
 	return m, nil
+}
+
+// chooserMenuStartLine is the Y offset (0-indexed) of the first menu option
+// in viewChooser. Header: blank, brand, blank, path, blank = 5 lines.
+const chooserMenuStartLine = 5
+
+// Visible X offsets of "[ Yes ]" and "[ No ]" in the exit-confirm status bar.
+// Layout: "  Exit?  [ Yes ]  [ No ]"
+const (
+	exitYesX = 9
+	exitYesW = 7
+	exitNoX  = 18
+	exitNoW  = 6
+)
+
+func (m model) exitChoiceAt(x, y int) int {
+	if m.height > 0 && y != m.height-1 {
+		return -1
+	}
+	if x >= exitYesX && x < exitYesX+exitYesW {
+		return 0
+	}
+	if x >= exitNoX && x < exitNoX+exitNoW {
+		return 1
+	}
+	return -1
+}
+
+func (m model) chooserItemAt(y int) int {
+	idx := y - chooserMenuStartLine
+	if idx < 0 || idx >= len(m.chooser.options()) {
+		return -1
+	}
+	return idx
 }
 
 func (m model) chooserSelect() (model, tea.Cmd) {
@@ -249,6 +486,18 @@ func (m model) chooserSelect() (model, tea.Cmd) {
 		m.save = newSaveModel(path, existing)
 		m.saveReturnTo = screenChooser
 		m.screen = screenSave
+	case "add":
+		m.save = newSaveModel("", nil)
+		m.saveReturnTo = screenChooser
+		m.screen = screenSave
+	case "nopath":
+		m.chooser.selectHint = true
+		m.chooser.selectHintVisible = len(selectHintWord)
+		m.chooser.selectHintID++
+		id := m.chooser.selectHintID
+		return m, tea.Tick(1*time.Second, func(time.Time) tea.Msg {
+			return startSelectHintFadeMsg{id: id}
+		})
 	case "search":
 		m.search = newSearchModel("")
 		m.search.viewport.Width = m.width
@@ -256,7 +505,9 @@ func (m model) chooserSelect() (model, tea.Cmd) {
 		m.search.viewport.SetContent(renderSearchResults(m.search, m.width))
 		m.screen = screenSearch
 	case "reload":
-		return m, tea.Batch(fetchFinderPathCmd, m.chooserFlash("Reloading…", 1800))
+		m.chooser.reloading = true
+		m.chooser.reloaded = false
+		return m, tea.Batch(reloadFinderPathCmd, m.chooser.spinner.Tick)
 	case "data_folder":
 		dir := filepath.Dir(dataFile)
 		cmd := func() tea.Msg {
@@ -273,7 +524,9 @@ func (m model) chooserSelect() (model, tea.Cmd) {
 	case "help":
 		m.screen = screenHelp
 	case "exit":
-		return m, tea.Quit
+		m.chooser.confirmingExit = true
+		m.chooser.exitChoice = 0
+		return m, nil
 	}
 	return m, nil
 }
@@ -314,9 +567,20 @@ func (m model) viewChooser() string {
 	}
 
 	// fill + status
-	status := styleMuted.Render("  ↑↓ navigate   enter select   esc quit")
+	status := styleMuted.Render("  ↑↓/mouse navigate   enter/click select   ^c quit")
 	if m.chooser.flashMsg != "" {
 		status = "  " + m.chooser.flashMsg
+	}
+	if m.chooser.confirmingExit {
+		yes, no := "[ Yes ]", "[ No ]"
+		if m.chooser.exitChoice == 0 {
+			yes = styleBoldYellow.Render(yes)
+			no = styleDim.Render(no)
+		} else {
+			yes = styleDim.Render(yes)
+			no = styleBoldYellow.Render(no)
+		}
+		status = "  " + styleBold.Render("Exit?") + "  " + yes + "  " + no + styleMuted.Render("   ←→ choose · enter confirm · esc cancel")
 	}
 	body := sb.String()
 	if m.height > 0 {
@@ -461,6 +725,23 @@ func (m model) updateSearch(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.search.viewport.Width = m.width
 		m.search.viewport.Height = m.height - 4
 		m.search.viewport.SetContent(renderSearchResults(m.search, m.width))
+		return m, nil
+
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if n := len(m.search.matches); n > 0 {
+				m.search.selected = (m.search.selected - 1 + n) % n
+				m.search.viewport.SetContent(renderSearchResults(m.search, m.width))
+				m.scrollToSelected()
+			}
+		case tea.MouseButtonWheelDown:
+			if n := len(m.search.matches); n > 0 {
+				m.search.selected = (m.search.selected + 1) % n
+				m.search.viewport.SetContent(renderSearchResults(m.search, m.width))
+				m.scrollToSelected()
+			}
+		}
 		return m, nil
 	}
 

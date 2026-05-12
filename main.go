@@ -24,7 +24,7 @@ func main() {
 
 func runTUI(initial screenID, arg string) {
 	m := newModel(initial, arg)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
