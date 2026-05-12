@@ -1058,6 +1058,12 @@ func (m model) updateSave(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			return m.saveAdvance()
+		case "tab", "down":
+			m.save = saveFocusStep(m.save, 1)
+			return m, nil
+		case "shift+tab", "up":
+			m.save = saveFocusStep(m.save, -1)
+			return m, nil
 		}
 		// pass to focused input
 		var cmd tea.Cmd
@@ -1067,6 +1073,26 @@ func (m model) updateSave(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.save.inputs[m.save.focused], cmd = m.save.inputs[m.save.focused].Update(msg)
 	return m, cmd
+}
+
+func saveFocusStep(sm saveModel, delta int) saveModel {
+	order := []int{inputPath, inputTitle, inputDesc}
+	if !sm.showPath {
+		order = []int{inputTitle, inputDesc}
+	}
+	idx := 0
+	for i, f := range order {
+		if f == sm.focused {
+			idx = i
+			break
+		}
+	}
+	n := len(order)
+	next := order[((idx+delta)%n+n)%n]
+	sm.inputs[sm.focused].Blur()
+	sm.focused = next
+	sm.inputs[next].Focus()
+	return sm
 }
 
 func (m model) saveAdvance() (model, tea.Cmd) {
@@ -1193,7 +1219,7 @@ func (m model) viewSave() string {
 	sb.WriteString("  " + sm.inputs[inputDesc].View() + "\n")
 
 	body := sb.String()
-	status := styleMuted.Render("  enter confirm   esc cancel")
+	status := styleMuted.Render("  tab/↑↓ move   enter confirm   esc cancel")
 	if m.height > 0 {
 		used := lipgloss.Height(body) + 1
 		if pad := m.height - used; pad > 0 {
